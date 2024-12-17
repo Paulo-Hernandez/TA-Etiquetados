@@ -28,6 +28,7 @@ db = configuration.get('db')
 username = configuration.get('username')
 password = configuration.get('password')
 id_sucursal = configuration.get('id_sucursal')
+cabecera = configuration.get('cabecera')
 
 # Autenticación en Odoo
 try:
@@ -61,7 +62,7 @@ def get_current_date():
 
 def calculate_ean13(numero_etiqueta):
     """ Calcular el código EAN13 con el formato requerido """
-    fixed_number = "25"  # Ejemplo de número fijo
+    fixed_number = cabecera  # Ejemplo de número fijo
     date_part = datetime.now().strftime('%d%m%y')
     base_ean = fixed_number + date_part + numero_etiqueta
 
