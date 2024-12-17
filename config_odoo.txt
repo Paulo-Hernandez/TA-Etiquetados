@@ -1,6 +1,5 @@
-url=https://carnes-a-punto-sandbox2-15848168.dev.odoo.com
-db=carnes-a-punto-sandbox2-15848168
+url=https://carnes-a-punto-sandbox-17118578.dev.odoo.com
+db=carnes-a-punto-sandbox-17118578
 username=apunto@ingmetrica.cl
 password=Carnesapunto123
-id_cliente=37
-id_sucursal=3
+id_sucursal=1

@@ -4,8 +4,7 @@ import os
 import shutil
 import time
 
-
-# Función para leer la configuración desde un archivo
+# Leer la configuración desde el archivo config_odoo.txt
 def read_config(config_file_path):
     configuration_values = {}
     try:
@@ -19,243 +18,150 @@ def read_config(config_file_path):
         print(f"Error al leer el archivo de configuración: {e}")
     return configuration_values
 
-
-# Leer configuración de config_odoo.txt
+# Configuración
 config_path = 'config_odoo.txt'
 configuration = read_config(config_path)
-
 url = configuration.get('url')
 db = configuration.get('db')
 username = configuration.get('username')
 password = configuration.get('password')
-id_cliente = configuration.get('id_cliente')
 id_sucursal = configuration.get('id_sucursal')
 
-# Autenticación
+# Autenticación en Odoo
 try:
     print("Autenticando...")
     common = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/common')
     uid = common.authenticate(db, username, password, {})
-
     if not uid:
-        print("Error de autenticación. Verifica las credenciales o la conexión al servidor.")
+        print("Error de autenticación. Verifica credenciales.")
         exit()
-
-    print("Versión del servidor:", common.version())
-    print("ID del usuario autenticado:", uid)
+    print("Autenticación exitosa, UID:", uid)
 except Exception as e:
     print(f"Error durante la autenticación: {e}")
-    input("Presiona Enter para salir...")
     exit()
 
-# Conexión a los objetos
-try:
-    models = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/object')
-except Exception as e:
-    print(f"Error al conectar con el servidor de objetos: {e}")
-    input("Presiona Enter para salir...")
-    exit()
+# Conexión a modelos
+models = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/object')
 
+def get_active_pos_sessions(sucursal_id):
+    """ Obtener sesiones POS activas para una sucursal """
+    try:
+        session_ids = models.execute_kw(db, uid, password, 'pos.session', 'search', [
+            [['state', '=', 'opened'], ['config_id', '=', int(sucursal_id)]]
+        ])
+        return session_ids
+    except Exception as e:
+        print(f"Error al obtener sesiones activas: {e}")
+        return []
 
-# Obtener la fecha actual
 def get_current_date():
     return datetime.now().strftime('%Y-%m-%d')
 
+def calculate_ean13(numero_etiqueta):
+    """ Calcular el código EAN13 con el formato requerido """
+    fixed_number = "25"  # Ejemplo de número fijo
+    date_part = datetime.now().strftime('%d%m%y')
+    base_ean = fixed_number + date_part + numero_etiqueta
+    print(base_ean)
 
-# Función para obtener el ID de un producto por su referencia interna
-def get_product_id_by_internal_reference(internal_reference):
+    def calculate_check_digit(ean12):
+        even_sum = sum(int(ean12[i]) for i in range(1, 12, 2))
+        odd_sum = sum(int(ean12[i]) for i in range(0, 12, 2))
+        total = odd_sum + 3 * even_sum
+        return (10 - (total % 10)) % 10
+
+    check_digit = calculate_check_digit(base_ean[:12])
+    return base_ean[:12] + str(check_digit)
+
+def get_product_id_by_reference(reference):
+    """ Buscar producto por referencia interna """
     try:
         product_ids = models.execute_kw(db, uid, password, 'product.product', 'search', [
-            [['default_code', '=', internal_reference]]
+            [['default_code', '=', reference]]
         ])
-        if product_ids:
-            return product_ids[0]
-        else:
-            print(f"No se encontró ningún producto con la referencia interna '{internal_reference}'")
-            return None
+        return product_ids[0] if product_ids else None
     except Exception as e:
-        print(f"Error al buscar el producto: {e}")
+        print(f"Error buscando el producto '{reference}': {e}")
         return None
 
-
-# Leer un archivo y extraer referencias internas y cantidades
-def extract_references_and_quantities(file_name):
-    references_and_quantities = []
+def create_ticket(numero_etiqueta, pos_session_id, company_id, ean13):
+    """ Crear registro en tickets.n.products """
+    print(ean13)
     try:
-        with open(file_name, 'r') as f:
-            for line in f:
-                if len(line) >= 12:
-                    reference = line[0:6].strip().lstrip('0')
-                    quantity_str = line[7:13].strip().zfill(6)
-                    try:
-                        quantity = int(quantity_str)
-                    except ValueError:
-                        print(f"Error al convertir la cantidad {quantity_str}' a entero en la línea: {line}")
-                        continue
-
-                    if quantity > 50:
-                        quantity = quantity / 1000.0
-
-                    references_and_quantities.append((reference, quantity))
-    except FileNotFoundError:
-        print(f"Archivo {file_name} no encontrado.")
-    except Exception as e:
-        print(f"Error al leer el archivo {file_name}: {e}")
-
-    return references_and_quantities
-
-
-# Función para extraer el código completo de un archivo
-def extract_ref_complete(file_name):
-    try:
-        with open(file_name, 'r') as f:
-            first_line = f.readline().strip()
-            return first_line
-    except FileNotFoundError:
-        print(f"Archivo {file_name} no encontrado.")
-    except Exception as e:
-        print(f"Error al leer el archivo {file_name}: {e}")
-    return None
-
-
-# Función para calcular el EAN13 basado en datos de referencia y cantidad
-def calculo_ean(complete_code):
-    if len(complete_code) < 48:
-        print("El código completo no tiene el formato esperado.")
-        return ""
-
-    fecha_part = complete_code[25:31]
-    numero_bal = complete_code[40:42]
-    ticket_part = str(int(complete_code)).zfill(4)[-4:]
-    base_number = numero_bal + fecha_part + ticket_part
-
-    ean_12 = base_number.zfill(12)  # Asegurarse de que tenga 12 dígitos
-
-    # Calcular el dígito de control
-    def calculate_check_digit(ean_12_code):
-        sum_even = sum(int(ean_12_code[i]) for i in range(1, 12, 2))
-        sum_odd = sum(int(ean_12_code[i]) for i in range(0, 12, 2))
-        check_sum = (sum_odd + 3 * sum_even) % 10
-        return (10 - check_sum) % 10
-
-    check_digit = calculate_check_digit(ean_12)
-    ean_13 = ean_12 + str(check_digit)
-    return ean_13
-
-
-# Crear una orden de venta
-def create_sale_order(date_order, complete_code):
-    ean_13 = calculo_ean(complete_code)
-    ticket_part = str(int(complete_code)).zfill(4)[-4:]
-    vendedor = complete_code[38:40]
-    if not ean_13:
-        print("No se pudo generar el código EAN13.")
-        return None
-
-    try:
-        order_id = models.execute_kw(db, uid, password, 'etiquetado.etiqueta', 'create', [{
-            'numero_etiqueta': ticket_part,
+        ticket_id = models.execute_kw(db, uid, password, 'tickets.n.products', 'create', [{
+            'numero_etiqueta': numero_etiqueta,
             'status': 'prepared',
-            'ean13': ean_13,
-            'company_id': int(id_sucursal),
-            'lote':"",
+            'pos_session_id': pos_session_id,
+            'company_id': company_id,
+            'ean13': ean13
         }])
-        return order_id
+        print(f"Ticket creado con ID: {ticket_id}")
+        return ticket_id
     except Exception as e:
-        print(f"Error al crear la orden de venta: {e}")
+        print(f"Error al crear el ticket: {e}")
         return None
 
-
-# Añadir productos a la orden de venta
-def add_products_to_order(etiqueta_id, references_and_quantities):
-    if not etiqueta_id:
-        print("ID de etiqueta no válido.")
-        return
-
-    order_lines = []
-    for reference, quantity in references_and_quantities:
-        product_id = get_product_id_by_internal_reference(reference)
-        if product_id is None:
+def add_products_to_ticket(ticket_id, products):
+    """ Agregar productos al ticket """
+    lines = []
+    for reference, quantity in products:
+        product_id = get_product_id_by_reference(reference)
+        if not product_id:
+            print(f"Producto no encontrado: {reference}")
             continue
-
+        # Obtener precio unitario del producto
+        product = models.execute_kw(db, uid, password, 'product.product', 'read', [[product_id], ['list_price']])
+        price = product[0]['list_price'] if product else 0.0
+        lines.append((0, 0, {
+            'product_id': product_id,
+            'cantidad': quantity,
+            'precio_unitario': price
+        }))
+    if lines:
         try:
-            if isinstance(product_id, list):
-                product_id = product_id[0] if product_id else None
-
-            if product_id is None:
-                print(f"No se encontró el producto para la referencia '{reference}'")
-                continue
-
-            product = models.execute_kw(db, uid, password, 'product.product', 'read', [product_id], {'fields': ['name', 'list_price']})
-            if not product:
-                print(f"Producto con ID {product_id} no encontrado.")
-                continue
-
-            product_name = product[0]['name']
-            product_price = product[0]['list_price']
-
-            # Agregar línea al nuevo modelo
-            order_lines.append((0, 0, {
-                'product_id': product_id,
-                'cantidad': quantity,
-                'precio_unitario': product_price,
-                'etiqueta_id': etiqueta_id  # Usa el campo correcto para enlazar la línea a la etiqueta
-            }))
-        except Exception as e:
-            print(f"Error al leer el producto con ID {product_id}: {e}")
-
-    if order_lines:
-        try:
-            # Usar el nuevo modelo para añadir las líneas de productos
-            models.execute_kw(db, uid, password, 'etiquetado.etiqueta', 'write', [[etiqueta_id], {
-                'lineas_ids': order_lines  # Asegúrate de usar el campo correcto en tu nuevo modelo
+            models.execute_kw(db, uid, password, 'tickets.n.products', 'write', [[ticket_id], {
+                'lineas_ids': lines
             }])
-            print(f"Productos añadidos a la etiqueta con ID: {etiqueta_id}")
+            print(f"Líneas de producto agregadas al ticket {ticket_id}")
         except Exception as e:
-            print(f"Error al añadir productos a la etiqueta: {e}")
-    else:
-        print("No se añadieron productos a la etiqueta.")
+            print(f"Error al agregar productos al ticket: {e}")
 
-
-# Función para procesar cualquier archivo .txt en el directorio de entrada
-def process_files_in_directory(input_directory, processed_directory):
-    # Asegúrate de que la carpeta de procesados exista
+def process_files(input_directory, processed_directory):
+    """ Procesa archivos txt del directorio de entrada """
     if not os.path.exists(processed_directory):
         os.makedirs(processed_directory)
 
-    # Procesar cada archivo .txt en el directorio de entrada
+    active_sessions = get_active_pos_sessions(id_sucursal)
+    if not active_sessions:
+        print("No hay sesiones POS activas para la sucursal proporcionada.")
+        return
+    pos_session_id = active_sessions[0]
+    print(f"Sesiones activas encontradas: {active_sessions}. Usando sesion ID: {pos_session_id}")
+
+    company_id = int(id_sucursal)  # Se asume que id_sucursal es el company_id correspondiente
+
     for file_name in os.listdir(input_directory):
         if file_name.endswith('.txt'):
             file_path = os.path.join(input_directory, file_name)
-            print(f"Procesando el archivo {file_path}...")
+            print(f"Procesando archivo: {file_name}")
+            try:
+                with open(file_path, 'r') as f:
+                    lines = f.readlines()
+                    numero_etiqueta = lines[0].strip()[:6]
+                    ean13 = calculate_ean13(numero_etiqueta)
+                    products = [(line[0:6].strip().lstrip('0'), int(line[7:13].strip())) for line in lines[1:]]
+                ticket_id = create_ticket(numero_etiqueta, pos_session_id, company_id, ean13)
+                if ticket_id:
+                    add_products_to_ticket(ticket_id, products)
+                    shutil.move(file_path, os.path.join(processed_directory, file_name))
+                    print(f"Archivo procesado y movido: {file_name}")
+            except Exception as e:
+                print(f"Error al procesar el archivo {file_name}: {e}")
 
-            references_and_quantities = extract_references_and_quantities(file_path)
-            complete_code = extract_ref_complete(file_path)
-
-            if not complete_code:
-                print("Código completo no encontrado.")
-                continue
-
-            print("Referencias y cantidades extraídas del archivo:")
-            for reference, quantity in references_and_quantities:
-                print(f"Referencia: {reference}, Cantidad: {quantity}")
-
-            order_id = create_sale_order(get_current_date(), complete_code)
-            if order_id:
-                print(f"Orden de venta creada con ID: {order_id}")
-                add_products_to_order(order_id, references_and_quantities)
-                shutil.move(file_path, os.path.join(processed_directory, file_name))
-                print(f"Archivo {file_name} procesado y movido a la carpeta 'Ticket_Procesados'.")
-            else:
-                print("No se pudo crear la orden de venta.")
-
-
-# Carpeta donde se encuentran los archivos .txt
 input_directory = 'Tickets'
-processed_directory = 'Ticket_Procesados'
+processed_directory = 'Tickets_Procesados'
 
-# Bucle principal que verifica y procesa los archivos
+# Bucle principal
 while True:
-    process_files_in_directory(input_directory, processed_directory)
-    print("Esperando por nuevos archivos...")
-    time.sleep(30)  # Espera 30 segundos antes de verificar nuevament
+    process_files(input_directory, processed_directory)
+    time.sleep(5)
