@@ -3,6 +3,8 @@ from datetime import datetime
 import os
 import shutil
 import time
+import watchdog.events
+import watchdog.observers
 
 # Leer la configuración desde el archivo config_odoo.txt
 def read_config(config_file_path):
@@ -62,7 +64,6 @@ def calculate_ean13(numero_etiqueta):
     fixed_number = "25"  # Ejemplo de número fijo
     date_part = datetime.now().strftime('%d%m%y')
     base_ean = fixed_number + date_part + numero_etiqueta
-    print(base_ean)
 
     def calculate_check_digit(ean12):
         even_sum = sum(int(ean12[i]) for i in range(1, 12, 2))
@@ -84,9 +85,14 @@ def get_product_id_by_reference(reference):
         print(f"Error buscando el producto '{reference}': {e}")
         return None
 
+def display_products_and_quantities(products):
+    """ Mostrar cantidades junto con la referencia interna del producto """
+    print("Resumen de productos y cantidades:")
+    for reference, quantity in products:
+        print(f"Referencia: {reference}, Cantidad: {quantity:.3f}")
+
 def create_ticket(numero_etiqueta, pos_session_id, company_id, ean13):
     """ Crear registro en tickets.n.products """
-    print(ean13)
     try:
         ticket_id = models.execute_kw(db, uid, password, 'tickets.n.products', 'create', [{
             'numero_etiqueta': numero_etiqueta,
@@ -117,6 +123,7 @@ def add_products_to_ticket(ticket_id, products):
             'cantidad': quantity,
             'precio_unitario': price
         }))
+    display_products_and_quantities(products)
     if lines:
         try:
             models.execute_kw(db, uid, password, 'tickets.n.products', 'write', [[ticket_id], {
@@ -126,42 +133,66 @@ def add_products_to_ticket(ticket_id, products):
         except Exception as e:
             print(f"Error al agregar productos al ticket: {e}")
 
-def process_files(input_directory, processed_directory):
-    """ Procesa archivos txt del directorio de entrada """
-    if not os.path.exists(processed_directory):
-        os.makedirs(processed_directory)
+def process_file(file_path, processed_directory, pos_session_id, company_id):
+    try:
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+            ticket_part = lines[0].strip()[-4:]  # Obtener los últimos 4 dígitos de la primera línea
+            ean13 = calculate_ean13(ticket_part)
+            products = []
+            for line in lines:
+                reference = line[0:6].strip().lstrip('0')  # Referencia del producto
+                middle_number = line[6:7]  # Determinar si es pesable o unitario
+                quantity = int(line[7:13].strip())
+                if middle_number == '0':
+                    quantity = quantity / 1000.0  # Convertir a kilogramos si es pesable
+                products.append((reference, quantity))
+            display_products_and_quantities(products)
+        ticket_id = create_ticket(ticket_part, pos_session_id, company_id, ean13)
+        if ticket_id:
+            add_products_to_ticket(ticket_id, products)
+            shutil.move(file_path, os.path.join(processed_directory, os.path.basename(file_path)))
+            print(f"Archivo procesado y movido: {file_path}")
+    except Exception as e:
+        print(f"Error al procesar el archivo {file_path}: {e}")
+
+class Handler(watchdog.events.FileSystemEventHandler):
+    def __init__(self, processed_directory, pos_session_id, company_id):
+        self.processed_directory = processed_directory
+        self.pos_session_id = pos_session_id
+        self.company_id = company_id
+
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        if event.src_path.endswith('.txt'):
+            print(f"Nuevo archivo detectado: {event.src_path}")
+            process_file(event.src_path, self.processed_directory, self.pos_session_id, self.company_id)
+
+if __name__ == "__main__":
+    input_directory = 'Tickets'
+    processed_directory = 'Tickets_Procesados'
 
     active_sessions = get_active_pos_sessions(id_sucursal)
     if not active_sessions:
         print("No hay sesiones POS activas para la sucursal proporcionada.")
-        return
+        exit()
     pos_session_id = active_sessions[0]
-    print(f"Sesiones activas encontradas: {active_sessions}. Usando sesion ID: {pos_session_id}")
-
     company_id = int(id_sucursal)  # Se asume que id_sucursal es el company_id correspondiente
 
-    for file_name in os.listdir(input_directory):
-        if file_name.endswith('.txt'):
-            file_path = os.path.join(input_directory, file_name)
-            print(f"Procesando archivo: {file_name}")
-            try:
-                with open(file_path, 'r') as f:
-                    lines = f.readlines()
-                    numero_etiqueta = lines[0].strip()[:6]
-                    ean13 = calculate_ean13(numero_etiqueta)
-                    products = [(line[0:6].strip().lstrip('0'), int(line[7:13].strip())) for line in lines[1:]]
-                ticket_id = create_ticket(numero_etiqueta, pos_session_id, company_id, ean13)
-                if ticket_id:
-                    add_products_to_ticket(ticket_id, products)
-                    shutil.move(file_path, os.path.join(processed_directory, file_name))
-                    print(f"Archivo procesado y movido: {file_name}")
-            except Exception as e:
-                print(f"Error al procesar el archivo {file_name}: {e}")
+    if not os.path.exists(processed_directory):
+        os.makedirs(processed_directory)
 
-input_directory = 'Tickets'
-processed_directory = 'Tickets_Procesados'
+    observer = watchdog.observers.Observer()
+    event_handler = Handler(processed_directory, pos_session_id, company_id)
+    observer.schedule(event_handler, path=input_directory, recursive=False)
 
-# Bucle principal
-while True:
-    process_files(input_directory, processed_directory)
-    time.sleep(5)
+    print(f"Monitoreando la carpeta '{input_directory}' para nuevos archivos...")
+    observer.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+        print("Monitoreo detenido.")
+    observer.join()
